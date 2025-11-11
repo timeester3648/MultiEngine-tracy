@@ -1397,7 +1397,7 @@ void Function()
 }
 \end{lstlisting}
 
-This doesn't stop some compilers from dispensing \emph{fashion advice} about variable shadowing (as both \texttt{ZoneScoped} calls create a variable with the same name, with the inner scope one shadowing the one in the outer scope). If you want to avoid these warnings, you will also need to use the \texttt{ZoneNamed} macros.
+This doesn't stop some compilers from dispensing \emph{fashion advice} about variable shadowing (as both \texttt{ZoneScoped} calls create a variable with the same name, with the inner scope one shadowing the one in the outer scope). By default the produced warnings are suppressed when using clang, gcc or MSVC. This behavior can be opted out of by defining \texttt{TRACY\_ALLOW\_SHADOW\_WARNING}. An alternative approach avoids variable name shadowing by manually defining zone names with \texttt{ZoneNamed}. Using this approach requires using the V variants of zone macros like \texttt{ZoneTextV}.
 
 \subsubsection{Exiting program from within a zone}
 
@@ -2239,6 +2239,15 @@ When the timestamps are fetched from the GPU, they must then be emitted via the 
 CPU and GPU timestamps may be periodically resynchronized via the \texttt{\_\_\_tracy\_emit\_gpu\_time\_sync} function, which takes the GPU timestamp closest to the moment of the call. This can help with timestamp drift and work around compounding GPU timestamp overflowing. Note that this requires CPU and GPU synchronization, which will block execution of your application. Do not do this every frame.
 
 To see how you should use this API, you should look at the reference implementation contained in API-specific C++ headers provided by Tracy. For example, to see how to write your instrumentation of OpenGL, you should closely follow the contents of the \texttt{TracyOpenGL.hpp} implementation.
+
+
+\begin{bclogo}[
+	noborder=true,
+	couleur=black!5,
+	logo=\bcbombe
+	]{Important}
+A common mistake is to skip the zone "\texttt{isActive}" check. When using \texttt{TRACY\_ON\_DEMAND}, you need to read the value of \texttt{TracyCIsConnected} once, and check the same value for both \newline \texttt{\_\_\_tracy\_emit\_gpu\_zone\_begin\_alloc} and \texttt{\_\_\_tracy\_emit\_gpu\_zone\_end}. Tracy may otherwise receive a zone end without a zone begin.
+\end{bclogo}
 
 \subsubsection{Fibers}
 
@@ -3511,6 +3520,14 @@ You will find the zones with locks and their associated threads on this combined
 
 \draw(7.5, -0.5) rectangle+(6.5, -0.5) node[midway] {Render};
 
+
+\draw[densely dotted,ultra thick,,color=lightgray] (0.11, -0.25) -- (0.11, -1.75);
+\draw(0.11, -0.25) node[circle,draw,fill,color=lightgray,inner sep=0pt,minimum size=3.5] {};
+\draw(0.11, -0.75) node[circle,draw,fill,color=lightgray,inner sep=0pt,minimum size=3.5] {};
+\draw(0.11, -1.25) node[circle,draw,fill,color=lightgray,inner sep=0pt,minimum size=3.5] {};
+\draw(0.11, -1.75) node[circle,draw,fill,color=lightgray,inner sep=0pt,minimum size=3.5] {};
+
+
 \draw(0, -2.5) node[anchor=north west] {Physics lock};
 \draw[pattern=crosshatch dots] (3.1, -2.5) rectangle+(2.5, -0.5);
 
@@ -3549,6 +3566,8 @@ Labels accompanied by the \faCaretDown{}~symbol can be collapsed out of the view
 \begin{itemize}
 \item \emph{\faEyeSlash{}~Hide} -- Hides the label along with the content associated to it. To make the label visible again, you must find it in the options menu (section~\ref{options}).
 \end{itemize}
+
+Under the \faCaretDown{}~symbol are a series of points that allow to limit the depth of the zones displayed. Hover the~\faMousePointer{}~mouse pointer over a circle to display a line visualizing the cutting point, then click the \MMB{}~middle mouse button to apply or remove a zone depth limit.
 
 \subparagraph{Zones}
 
@@ -3794,6 +3813,11 @@ Function names in the remaining places across the UI will be normalized unless t
 \end{itemize}
 
 Disabling the display of some events is especially recommended when the profiler performance drops below acceptable levels for interactive usage.
+
+It is possible to store defaults for the settings marked with a \emph{*} to the global Tracy configuration file.
+This can be done using the \emph{Save current options as defaults} button at the bottom of the window, or by manually editing this configuration file (for which the path is indicated in the tooltip).
+Next time you use Tracy, these stored default options will be used instead.
+For now, restoring the defaults can be done by deleting the configuration file.
 
 \subsection{Messages window}
 \label{messages}

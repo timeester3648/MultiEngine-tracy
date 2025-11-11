@@ -687,10 +687,13 @@ constexpr struct wl_registry_listener registryListener = {
 };
 
 
+static bool s_configureAcked = false;
+
 static void XdgSurfaceConfigure( void*, struct xdg_surface* surf, uint32_t serial )
 {
     tracy::s_wasActive = true;
     xdg_surface_ack_configure( surf, serial );
+    s_configureAcked = true;
 }
 
 constexpr struct xdg_surface_listener xdgSurfaceListener = {
@@ -986,7 +989,6 @@ Backend::Backend( const char* title, const std::function<void()>& redraw, const 
 
     s_surf = wl_compositor_create_surface( s_comp );
     wl_surface_add_listener( s_surf, &surfaceListener, nullptr );
-    s_eglWin = wl_egl_window_create( s_surf, m_winPos.w, m_winPos.h );
     s_xdgSurf = xdg_wm_base_get_xdg_surface( s_wm, s_surf );
     xdg_surface_add_listener( s_xdgSurf, &xdgSurfaceListener, nullptr );
 
@@ -1021,6 +1023,15 @@ Backend::Backend( const char* title, const std::function<void()>& redraw, const 
     res = eglBindAPI( EGL_OPENGL_API );
     if( res != EGL_TRUE ) { fprintf( stderr, "Cannot use OpenGL through EGL!\n" ); exit( 1 ); }
 
+    wl_display_roundtrip( s_dpy );
+    s_toplevel = xdg_surface_get_toplevel( s_xdgSurf );
+    xdg_toplevel_add_listener( s_toplevel, &toplevelListener, nullptr );
+    xdg_toplevel_set_title( s_toplevel, title );
+    xdg_toplevel_set_app_id( s_toplevel, "tracy" );
+    wl_surface_commit( s_surf );
+    while( !s_configureAcked ) wl_display_roundtrip( s_dpy );
+
+    s_eglWin = wl_egl_window_create( s_surf, int( round( s_width * s_maxScale / 120.f ) ), int( round( s_height * s_maxScale / 120.f ) ) );
     s_eglSurf = eglCreatePlatformWindowSurface( s_eglDpy, eglConfig, s_eglWin, nullptr );
 
     constexpr EGLint eglCtxAttrib[] = {
@@ -1036,12 +1047,6 @@ Backend::Backend( const char* title, const std::function<void()>& redraw, const 
     if( res != EGL_TRUE ) { fprintf( stderr, "Cannot make EGL context current!\n" ); exit( 1 ); }
 
     ImGui_ImplOpenGL3_Init( "#version 150" );
-
-    wl_display_roundtrip( s_dpy );
-    s_toplevel = xdg_surface_get_toplevel( s_xdgSurf );
-    xdg_toplevel_add_listener( s_toplevel, &toplevelListener, nullptr );
-    xdg_toplevel_set_title( s_toplevel, title );
-    xdg_toplevel_set_app_id( s_toplevel, "tracy" );
 
     if( s_activation )
     {
@@ -1129,7 +1134,8 @@ void Backend::Show()
 
 void Backend::Run()
 {
-    while( s_running && wl_display_dispatch( s_dpy ) != -1 )
+    timespec zero = {};
+    while( s_running && wl_display_dispatch_timeout( s_dpy, &zero ) != -1 )
     {
         if( tracy::s_config.focusLostLimit && !s_hasFocus ) std::this_thread::sleep_for( std::chrono::milliseconds( 50 ) );
         s_redraw();
@@ -1166,12 +1172,8 @@ void Backend::NewFrame( int& w, int& h )
     {
         s_prevWidth = s_width;
         s_prevHeight = s_height;
-        wl_egl_window_resize( s_eglWin, s_width * s_maxScale / 120, s_height * s_maxScale / 120, 0, 0 );
-        if( s_fracSurf )
-        {
-            wp_viewport_set_source( s_viewport, 0, 0, wl_fixed_from_double( s_width * s_maxScale / 120. ), wl_fixed_from_double( s_height * s_maxScale / 120. ) );
-            wp_viewport_set_destination( s_viewport, s_width, s_height );
-        }
+        wl_egl_window_resize( s_eglWin, int( round( s_width * s_maxScale / 120.f ) ), int( round( s_height * s_maxScale / 120.f ) ), 0, 0 );
+        if( s_fracSurf ) wp_viewport_set_destination( s_viewport, s_width, s_height );
     }
 
     if( s_prevScale != s_maxScale )
@@ -1189,8 +1191,8 @@ void Backend::NewFrame( int& w, int& h )
         m_winPos.h = s_height;
     }
 
-    w = s_width * s_maxScale / 120;
-    h = s_height * s_maxScale / 120;
+    w = int( round ( s_width * s_maxScale / 120.f ) );
+    h = int( round ( s_height * s_maxScale / 120.f ) );
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2( w, h );
@@ -1293,7 +1295,7 @@ void Backend::EndFrame()
     const ImVec4 clear_color = ImColor( 20, 20, 17 );
 
     ImGui::Render();
-    glViewport( 0, 0, s_width * s_maxScale / 120, s_height * s_maxScale / 120 );
+    glViewport( 0, 0, GLsizei( round( s_width * s_maxScale / 120.f ) ), GLsizei( round ( s_height * s_maxScale / 120.f ) ) );
     glClearColor( clear_color.x, clear_color.y, clear_color.z, clear_color.w );
     glClear( GL_COLOR_BUFFER_BIT );
     ImGui_ImplOpenGL3_RenderDrawData( ImGui::GetDrawData() );
