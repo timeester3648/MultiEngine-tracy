@@ -28,74 +28,6 @@ void View::DrawCallstackWindow()
     if( !show ) m_callstackInfoWindow = 0;
 }
 
-static nlohmann::json GetCallstackJson( Worker& worker, const VarArray<CallstackFrameId>& cs )
-{
-    nlohmann::json json = {
-        { "type", "callstack" },
-        { "frames", nlohmann::json::array() }
-    };
-    auto& frames = json["frames"];
-
-    int fidx = 0;
-    for( auto& entry : cs )
-    {
-        auto frameData = worker.GetCallstackFrame( entry );
-        if( !frameData )
-        {
-            frames.push_back( { "pointer", worker.GetCanonicalPointer( entry ) } );
-        }
-        else
-        {
-            const auto fsz = frameData->size;
-            for( uint8_t f=0; f<fsz; f++ )
-            {
-                const auto& frame = frameData->data[f];
-                auto txt = worker.GetString( frame.name );
-
-                if( fidx == 0 && f != fsz-1 )
-                {
-                    auto test = tracy::s_tracyStackFrames;
-                    bool match = false;
-                    do
-                    {
-                        if( strcmp( txt, *test ) == 0 )
-                        {
-                            match = true;
-                            break;
-                        }
-                    }
-                    while( *++test );
-                    if( match ) continue;
-                }
-
-                frames.push_back( {
-                    { "function", txt },
-                    { "source", worker.GetString( frame.file ) },
-                } );
-                auto& frameJson = frames.back();
-
-                if( f == fsz-1 )
-                {
-                    frameJson["frame"] = fidx++;
-                }
-                else
-                {
-                    frameJson["inline"] = true;
-                }
-                if( frame.line != 0 )
-                {
-                    frameJson["line"] = frame.line;
-                }
-                if( frameData->imageName.Active() )
-                {
-                    frameJson["executable"] = worker.GetString( frameData->imageName );
-                }
-            }
-        }
-    }
-    return json;
-}
-
 void View::DrawCallstackTable( uint32_t callstack, bool globalEntriesButton )
 {
     auto& cs = m_worker.GetCallstack( callstack );
@@ -173,7 +105,7 @@ void View::DrawCallstackTable( uint32_t callstack, bool globalEntriesButton )
         ImGui::SameLine();
         if( ImGui::SmallButton( ICON_FA_ROBOT ) )
         {
-            AddLlmAttachment( GetCallstackJson( m_worker, cs ) );
+            AddLlmAttachment( GetCallstackJson( cs ) );
         }
         if( ImGui::IsItemHovered() && IsMouseClicked( ImGuiMouseButton_Right ) )
         {
@@ -183,13 +115,13 @@ void View::DrawCallstackTable( uint32_t callstack, bool globalEntriesButton )
         {
             if( ImGui::Selectable( "What is program doing at this moment?" ) )
             {
-                AddLlmAttachment( GetCallstackJson( m_worker, cs ) );
+                AddLlmAttachment( GetCallstackJson( cs ) );
                 AddLlmQuery( "What is program doing at this moment?" );
                 ImGui::CloseCurrentPopup();
             }
             if( ImGui::Selectable( "Walk me through the details of this callstack, step by step, explaining the code." ) )
             {
-                AddLlmAttachment( GetCallstackJson( m_worker, cs ) );
+                AddLlmAttachment( GetCallstackJson( cs ) );
                 AddLlmQuery( "Walk me through the details of this callstack, step by step, explaining the code." );
                 ImGui::CloseCurrentPopup();
             }
@@ -561,12 +493,15 @@ void View::SmallCallstackButton( const char* name, uint32_t callstack, int& idx,
 void View::DrawCallstackCalls( uint32_t callstack, uint16_t limit ) const
 {
     const auto& csdata = m_worker.GetCallstack( callstack );
-    const auto cssz = std::min( csdata.size(), limit );
     bool first = true;
-    for( uint16_t i=0; i<cssz; i++ )
+    for( auto& v : csdata )
     {
-        const auto frameData = m_worker.GetCallstackFrame( csdata[i] );
+        const auto frameData = m_worker.GetCallstackFrame( v );
         if( !frameData ) break;
+        const auto& frame = frameData->data[frameData->size - 1];
+        auto filename = m_worker.GetString( frame.file );
+        auto image = frameData->imageName.Active() ? m_worker.GetString( frameData->imageName ) : nullptr;
+        if( IsFrameExternal( filename, image ) ) continue;
         if( first )
         {
             first = false;
@@ -577,7 +512,6 @@ void View::DrawCallstackCalls( uint32_t callstack, uint16_t limit ) const
             TextDisabledUnformatted( ICON_FA_LEFT_LONG );
             ImGui::SameLine();
         }
-        const auto& frame = frameData->data[frameData->size - 1];
         auto txt = m_worker.GetString( frame.name );
         if( txt[0] == '[' )
         {
@@ -591,6 +525,7 @@ void View::DrawCallstackCalls( uint32_t callstack, uint16_t limit ) const
         {
             ImGui::TextUnformatted( ShortenZoneName( ShortenName::Always, txt ) );
         }
+        if( --limit == 0 ) break;
     }
 }
 

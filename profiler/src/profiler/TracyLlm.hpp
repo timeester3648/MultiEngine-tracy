@@ -19,6 +19,7 @@ namespace tracy
 class TracyLlmApi;
 class TracyLlmChat;
 class TracyLlmTools;
+class TracyManualData;
 class Worker;
 
 class TracyLlm
@@ -40,7 +41,7 @@ class TracyLlm
     };
 
 public:
-    TracyLlm( Worker& worker );
+    TracyLlm( Worker& worker, const TracyManualData& manual );
     ~TracyLlm();
 
     [[nodiscard]] bool IsBusy() const { std::lock_guard lock( m_lock ); return m_busy; }
@@ -57,13 +58,17 @@ private:
 
     void UpdateModels();
     void ResetChat();
+    void UpdateSystemPrompt();
 
     void QueueConnect();
 
     void AddMessageBlocking( std::string&& str, const char* role, std::unique_lock<std::mutex>& lock );
+    void AddMessageBlocking( nlohmann::json&& json, std::unique_lock<std::mutex>& lock );
 
     void ManageContext( std::unique_lock<std::mutex>& lock );
     void SendMessage( std::unique_lock<std::mutex>& lock );
+
+    void AppendResponse( const char* name, const nlohmann::json& delta );
     bool OnResponse( const nlohmann::json& json );
 
     std::unique_ptr<TracyLlmApi> m_api;
@@ -87,13 +92,14 @@ private:
     int m_usedCtx = 0;
     float m_temperature = 1.0f;
     bool m_setTemperature = false;
+    bool m_allThinkingRegions = false;
 
     char* m_input;
     char* m_apiInput;
     std::vector<nlohmann::json> m_chat;
 
     std::shared_ptr<EmbedData> m_systemPrompt;
-    std::shared_ptr<EmbedData> m_systemReminder;
+    nlohmann::json m_toolsJson;
 };
 
 }

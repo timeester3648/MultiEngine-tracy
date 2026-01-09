@@ -24,13 +24,22 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "15")
+          message(FATAL_ERROR "Apple Clang 15 or newer is required.")
+        elseif(NOT CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "16")
+          # AppleClang 15 has issues with to_chars in <chrono> if target is too old
+          add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mmacosx-version-min=13.3>)
+        endif()
         add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
     endif()
 endif()
 
 if(WIN32)
     add_definitions(-DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
-    add_compile_options(/MP)
+    # /MP is MSVC-specific for multi-processor compilation
+    if(MSVC)
+        add_compile_options(/MP)
+    endif()
 endif()
 
 if(EMSCRIPTEN)

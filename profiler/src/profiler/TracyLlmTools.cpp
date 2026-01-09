@@ -9,15 +9,12 @@
 #include <time.h>
 
 #include "TracyConfig.hpp"
-#include "TracyEmbed.hpp"
 #include "TracyLlmApi.hpp"
 #include "TracyLlmTools.hpp"
+#include "TracyManualData.hpp"
 #include "TracyStorage.hpp"
 #include "TracyUtility.hpp"
 #include "TracyWorker.hpp"
-#include "tracy_xxhash.h"
-
-#include "data/Manual.hpp"
 
 constexpr const char* NoNetworkAccess = "Internet access is disabled by the user. You may inform the user that he can enable it in the settings, so that you can use the tools to gather information.";
 
@@ -81,122 +78,29 @@ static std::unique_ptr<pugi::xml_document> ParseHtml( const std::string& html )
     return doc;
 }
 
-TracyLlmTools::TracyLlmTools( Worker& worker )
-    : m_manual( Unembed( Manual ) )
-    , m_worker( worker )
+TracyLlmTools::TracyLlmTools( Worker& worker, const TracyManualData& manual )
+    : m_worker( worker )
+    , m_manual( manual )
 {
-    std::string_view manual( m_manual->data(), m_manual->size() );
-    const auto sz = (int)m_manual->size();
-
-    std::vector<int> levels = { 0 };
-    std::vector<std::string> chapterNames = { "Title Page" };
-
-    int manualChunkPos = 0;
-    int pos = 0;
-    while( pos < sz )
+    int idx = 0;
+    for( auto& chunk : m_manual.GetChunks() )
     {
-        std::string::size_type next = pos;
-        for(;;)
+        std::string hdr;
+        if( !chunk.section.empty() ) hdr += "Section " + chunk.section;
+        if( !chunk.title.empty() )
         {
-            next = manual.find( '\n', next );
-            if( next == std::string_view::npos )
-            {
-                next = sz;
-                break;
-            }
-            if( next+1 >= sz || manual[next+1] == '\n' ) break;
-            next++;
+            if( !chunk.section.empty() ) hdr += ": ";
+            hdr += chunk.title;
         }
-        if( next != pos )
+        hdr += '\n';
+
+        for( auto& line : SplitLines( chunk.text.c_str(), chunk.text.size() ) )
         {
-            std::string_view line( manual.data() + pos, next - pos );
-            if( line != "---" && line != ":::" && line != "::: bclogo" )
-            {
-                if( line[0] == '#' )
-                {
-                    if( manualChunkPos != pos )
-                    {
-                        auto start = manualChunkPos;
-                        auto end = pos;
-                        manualChunkPos = pos;
-
-                        while( manual[start] != '\n' ) start++;
-                        while( manual[start] == '\n' ) start++;
-                        while( manual[end-1] == '\n' ) end--;
-
-                        if( end > start )
-                        {
-                            std::string text, section, title, parents;
-                            text = std::string( manual.data() + start, end - start );
-                            if( levels[0] != 0 )
-                            {
-                                section = std::to_string( levels[0] );
-                                for( size_t i=1; i<levels.size(); i++ ) section += "." + std::to_string( levels[i] );
-                            }
-                            if( levels.size() == 1 )
-                            {
-                                title = chapterNames[0];
-                            }
-                            else
-                            {
-                                title = chapterNames[levels.size()-1];
-                                parents = chapterNames[0];
-                                for( size_t i=1; i<levels.size() - 1; i++ ) parents += " > " + chapterNames[i];
-                            }
-                            m_manualChunks.emplace_back( ManualChunk {
-                                .text = std::move( text ),
-                                .section = std::move( section ),
-                                .title = std::move( title ),
-                                .parents = std::move( parents )
-                            } );
-                        }
-                    }
-
-                    int level = 1;
-                    if( line.find( ".unnumbered}" ) == std::string_view::npos )
-                    {
-                        while( level < line.size() && line[level] == '#' ) level++;
-                        if( level != levels.size() )
-                        {
-                            levels.resize( level, 0 );
-                            chapterNames.resize( level );
-                        }
-                        levels[level - 1]++;
-                        chapterNames[level - 1] = line.substr( level + 1 );
-                    }
-                }
-                else
-                {
-                    std::string chunk;
-                    if( levels[0] != 0 )
-                    {
-                        chunk += "Section " + std::to_string( levels[0] );
-                        for( size_t i=1; i<levels.size(); i++ ) chunk += "." + std::to_string( levels[i] );
-                        chunk += "\n";
-                    }
-                    chunk += chapterNames[levels.size()-1] + "\n\n";
-                    chunk += std::string( line );
-                    m_chunkData.emplace_back( std::move( chunk ), m_manualChunks.size() );
-                }
-            }
+            if( line.empty() ) continue;
+            if( line == "---" || line == ":::" || line == "::: bclogo" ) continue;
+            m_chunkData.emplace_back( hdr + line, idx );
         }
-        pos = next + 1;
-        while( pos < sz && manual[pos] == '\n' ) pos++;
-    }
-    if( manualChunkPos != pos )
-    {
-        std::string manualChunk;
-        if( levels[0] != 0 )
-        {
-            manualChunk += "Section " + std::to_string( levels[0] );
-            for( size_t i=1; i<levels.size(); i++ ) manualChunk += "." + std::to_string( levels[i] );
-            manualChunk += "\n";
-        }
-        manualChunk += "Navigation: " + chapterNames[0];
-        for( size_t i=1; i<levels.size(); i++ ) manualChunk += " > " + chapterNames[i];
-        manualChunk += "\n\n";
-        manualChunk += std::string( manual.data() + manualChunkPos, pos - manualChunkPos );
-        m_manualChunks.emplace_back( std::move( manualChunk ) );
+        idx++;
     }
 }
 
@@ -205,57 +109,71 @@ TracyLlmTools::~TracyLlmTools()
     CancelManualEmbeddings();
 }
 
-static const std::string& GetParam( const nlohmann::json& json, const char* name )
+template<typename T>
+static T GetParam( const nlohmann::json& json, const char* name )
 {
     if( !json.contains( name ) ) throw std::runtime_error( "Error: missing parameter: " + std::string( name ) );
-    return json[name].get_ref<const std::string&>();
+    if constexpr( std::is_reference_v<T> )
+    {
+        return json[name].get_ref<T>();
+    }
+    else
+    {
+        return json[name].get<T>();
+    }
 }
 
-static uint32_t GetParamU32( const nlohmann::json& json, const char* name )
+template<typename T>
+static T GetParamOpt( const nlohmann::json& json, const char* name, T def )
 {
-    if( !json.contains( name ) ) throw std::runtime_error( "Error: missing parameter: " + std::string( name ) );
-    return json[name].get<uint32_t>();
+    if( !json.contains( name ) ) return def;
+    return json[name].get<T>();
 }
 
-#define Param(name) GetParam( json, name )
-#define ParamU32(name) GetParamU32( json, name )
+#define Param(name) GetParam<const std::string&>( json, name )
+#define ParamU32(name) GetParam<uint32_t>( json, name )
+#define ParamOptU32(name, def) GetParamOpt<uint32_t>( json, name, def )
+#define ParamOptBool(name, def) GetParamOpt<bool>( json, name, def )
 
-TracyLlmTools::ToolReply TracyLlmTools::HandleToolCalls( const nlohmann::json& json, TracyLlmApi& api, int contextSize, bool hasEmbeddingsModel )
+TracyLlmTools::ToolReply TracyLlmTools::HandleToolCalls( const std::string& tool, const nlohmann::json& json, TracyLlmApi& api, int contextSize, bool hasEmbeddingsModel )
 {
     m_ctxSize = contextSize;
 
     try
     {
-        auto name = json["tool"].get_ref<const std::string&>();
-        if( name == "search_wikipedia" )
+        if( tool == "search_wikipedia" )
         {
             return SearchWikipedia( Param( "query" ), Param( "language" ) );
         }
-        else if( name == "get_wikipedia" )
+        else if( tool == "get_wikipedia" )
         {
             return { .reply = GetWikipedia( Param( "page" ), Param( "language" ) ) };
         }
-        else if( name == "get_dictionary" )
+        else if( tool == "get_dictionary" )
         {
             return { .reply = GetDictionary( Param( "word" ), Param( "language" ) ) };
         }
-        else if( name == "search_web" )
+        else if( tool == "search_web" )
         {
             return { .reply = SearchWeb( Param( "query" ) ) };
         }
-        else if( name == "get_webpage" )
+        else if( tool == "get_webpage" )
         {
             return { .reply = GetWebpage( Param( "url" ) ) };
         }
-        else if( name == "user_manual" )
+        else if( tool == "user_manual" )
         {
             return { .reply = SearchManual( Param( "query" ), api, hasEmbeddingsModel ) };
         }
-        else if( name == "source_file" )
+        else if( tool == "source_file" )
         {
-            return { .reply = SourceFile( Param( "file" ), ParamU32( "line" ) ) };
+            return { .reply = SourceFile( Param( "file" ), ParamU32( "line" ), ParamOptU32( "context", 50 ) ) };
         }
-        return { .reply = "Unknown tool call: " + name };
+        else if( tool == "source_search" )
+        {
+            return { .reply = SourceSearch( Param( "query" ), ParamOptBool( "case_insensitive", false ) ) };
+        }
+        return { .reply = "Unknown tool call: " + tool };
     }
     catch( const std::exception& e )
     {
@@ -288,12 +206,11 @@ void TracyLlmTools::SelectManualEmbeddings( const std::string& model )
     assert( !m_manualEmbeddingState.inProgress );
     if( m_manualEmbeddingState.done && m_manualEmbeddingState.model == model ) return;
 
-    const uint64_t hash = XXH3_64bits( m_manual->data(), m_manual->size() );
     auto cache = GetCachePath( model.c_str() );
 
     try
     {
-        m_manualEmbeddings = std::make_unique<TracyLlmEmbeddings>( cache, hash );
+        m_manualEmbeddings = std::make_unique<TracyLlmEmbeddings>( cache, m_manual.GetHash() );
         m_manualEmbeddingState = { .model = model, .done = true };
     }
     catch( std::exception& ) {}
@@ -315,7 +232,6 @@ void TracyLlmTools::BuildManualEmbeddings( const std::string& model, TracyLlmApi
 
 void TracyLlmTools::ManualEmbeddingsWorker( TracyLlmApi& api )
 {
-    const uint64_t hash = XXH3_64bits( m_manual->data(), m_manual->size() );
     auto cache = GetCachePath( m_manualEmbeddingState.model.c_str() );
 
     std::unique_lock lock( m_lock );
@@ -395,7 +311,7 @@ void TracyLlmTools::ManualEmbeddingsWorker( TracyLlmApi& api )
         i += bsz;
     }
 
-    m_manualEmbeddings->Save( cache, hash );
+    m_manualEmbeddings->Save( cache, m_manual.GetHash() );
 
     lock.lock();
     m_manualEmbeddingState.inProgress = false;
@@ -416,12 +332,13 @@ void TracyLlmTools::CancelManualEmbeddings()
 
 int TracyLlmTools::CalcMaxSize() const
 {
-    if( m_ctxSize <= 0 ) return 32*1024;
+    constexpr int limit = 32*1024;
+    if( m_ctxSize <= 0 ) return limit;
 
     // Limit the size of the response to avoid exceeding the context size
     // Assume average token size is 4 bytes. Make space for 3 articles to be retrieved.
-    const auto maxSize = ( m_ctxSize * 4 ) / 3;
-    return maxSize;
+    const int maxSize = ( m_ctxSize * 4 ) / 3;
+    return std::min( maxSize, limit );
 }
 
 std::string TracyLlmTools::TrimString( std::string&& str ) const
@@ -522,7 +439,7 @@ TracyLlmTools::ToolReply TracyLlmTools::SearchWikipedia( std::string query, cons
     output["key"] = key;
     output["title"] = summaryJson["title"];
     if( summaryJson.contains( "description" ) ) output["description"] = summaryJson["description"];
-    output["extract"] = summaryJson["extract"];
+    output["preview"] = summaryJson["extract"];
 
     std::string image;
     if( summaryJson.contains( "thumbnail" ) )
@@ -607,7 +524,7 @@ std::string TracyLlmTools::SearchWeb( std::string query )
                     auto& item = json["items"][i];
                     nlohmann::json result;
                     result["title"] = RemoveNewline( item["title"].get_ref<const std::string&>() );
-                    result["snippet"] = RemoveNewline( item["snippet"].get_ref<const std::string&>() );
+                    result["preview"] = RemoveNewline( item["snippet"].get_ref<const std::string&>() );
                     result["url"] = RemoveNewline( item["link"].get_ref<const std::string&>() );
                     results[i] = result;
                 }
@@ -642,7 +559,7 @@ std::string TracyLlmTools::SearchWeb( std::string query )
 
         nlohmann::json result;
         result["title"] = RemoveNewline( title.text().as_string() );
-        result["snippet"] = RemoveNewline( snippet.text().as_string() );
+        result["preview"] = RemoveNewline( snippet.text().as_string() );
         result["url"] = RemoveNewline( url.text().as_string() );
 
         json[i] = result;
@@ -825,12 +742,13 @@ std::string TracyLlmTools::SearchManual( const std::string& query, TracyLlmApi& 
     }
     if( chunks.size() > MaxOutputChunks ) chunks.resize( MaxOutputChunks );
 
+    auto& manualChunks = m_manual.GetChunks();
     const auto maxSize = CalcMaxSize();
     int totalSize = 0;
     int idx;
     for( idx = 0; idx < chunks.size(); idx++ )
     {
-        totalSize += m_manualChunks[chunks[idx].first].text.size();
+        totalSize += manualChunks[chunks[idx].first].text.size();
         if( totalSize >= maxSize ) break;
     }
     if( idx < chunks.size() ) chunks.resize( idx );
@@ -838,19 +756,20 @@ std::string TracyLlmTools::SearchManual( const std::string& query, TracyLlmApi& 
     nlohmann::json json;
     for( auto& chunk : chunks )
     {
+        auto& m = manualChunks[chunk.first];
         nlohmann::json r;
         r["distance"] = chunk.second;
-        r["content"] = m_manualChunks[chunk.first].text;
-        r["section"] = m_manualChunks[chunk.first].section;
-        r["title"] = m_manualChunks[chunk.first].title;
-        r["parents"] = m_manualChunks[chunk.first].parents;
+        r["content"] = m.text;
+        r["section"] = m.section;
+        r["title"] = m.title;
+        r["parents"] = m.parents;
         json.emplace_back( std::move( r ) );
     }
 
     return json.dump( 2, ' ', false, nlohmann::json::error_handler_t::replace );
 }
 
-std::string TracyLlmTools::SourceFile( const std::string& file, uint32_t line ) const
+std::string TracyLlmTools::SourceFile( const std::string& file, uint32_t line, uint32_t context ) const
 {
     if( line == 0 ) return "Error: Source file line number must be greater than 0.";
 
@@ -867,7 +786,7 @@ std::string TracyLlmTools::SourceFile( const std::string& file, uint32_t line ) 
     uint32_t minLine = line;
     uint32_t maxLine = line+1;
 
-    while( minLine > 0 || maxLine < lines.size() )
+    while( context > 0 && ( minLine > 0 || maxLine < lines.size() ) )
     {
         if( minLine > 0 )
         {
@@ -881,6 +800,7 @@ std::string TracyLlmTools::SourceFile( const std::string& file, uint32_t line ) 
             if( size >= maxSize ) break;
             maxLine++;
         }
+        context--;
     }
 
     nlohmann::json json = {
@@ -898,6 +818,85 @@ std::string TracyLlmTools::SourceFile( const std::string& file, uint32_t line ) 
     }
 
     return json.dump( 2, ' ', false, nlohmann::json::error_handler_t::replace );
+}
+
+std::string TracyLlmTools::SourceSearch( std::string query, bool caseInsensitive ) const
+{
+    auto& cache = m_worker.GetSourceFileCache();
+    nlohmann::json json = {};
+
+    size_t total = 0;
+    for( auto& item : cache )
+    {
+        if( IsFrameExternal( item.first, nullptr ) ) continue;
+
+        char* tmp = nullptr;
+        auto& mem = item.second;
+        auto start = mem.data;
+        auto end = start + mem.len;
+
+        if( caseInsensitive )
+        {
+            tmp = new char[mem.len];
+            std::transform( start, end, tmp, []( char c ) { return std::tolower( c ); } );
+            start = tmp;
+            end = tmp + mem.len;
+            std::transform( query.begin(), query.end(), query.begin(), []( char c ) { return std::tolower( c ); } );
+        }
+
+        if( std::search( start, end, query.begin(), query.end() ) == end )
+        {
+            delete[] tmp;
+            continue;
+        }
+
+        std::vector<size_t> res;
+        auto lines = SplitLines( start, mem.len );
+        for( size_t idx = 0; idx < lines.size(); idx++ )
+        {
+            if( lines[idx].find( query ) != std::string::npos )
+            {
+                res.emplace_back( idx );
+                total++;
+            }
+        }
+        assert( !res.empty() );
+
+        auto r = nlohmann::json::array();
+        if( caseInsensitive )
+        {
+            auto linesOrig = SplitLines( mem.data, mem.len );
+            for( auto& line : res )
+            {
+                r.push_back( {
+                    { "line", line + 1 },
+                    { "text", linesOrig[line] }
+                } );
+            }
+        }
+        else
+        {
+            for( auto& line : res )
+            {
+                r.push_back( {
+                    { "line", line + 1 },
+                    { "text", lines[line] }
+                } );
+            }
+        }
+
+        json.push_back( {
+            { "file", item.first },
+            { "matches", std::move( r ) }
+        } );
+
+        delete[] tmp;
+    }
+
+    if( total == 0 ) return "No matches found.";
+    auto ret = json.dump( 2, ' ', false, nlohmann::json::error_handler_t::replace );
+    if( ret.size() > CalcMaxSize() ) return "Too many matches found.";
+    return ret;
 }
 
 }

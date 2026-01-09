@@ -1,4 +1,4 @@
-project('tracy', ['cpp'], version: '0.13.0', meson_version: '>=1.3.0', default_options : ['cpp_std=c++11'])
+project('tracy', ['cpp'], version: '0.13.1', meson_version: '>=1.3.0', default_options : ['cpp_std=c++11'])
 
 # internal compiler flags
 tracy_compile_args = []
@@ -114,9 +114,17 @@ if get_option('verbose')
   tracy_common_args += ['-DTRACY_VERBOSE']
 endif
 
+if get_option('no_internal_message')
+  tracy_common_args += ['-DTRACY_NO_INTERNAL_MESSAGE']
+endif
+
 if get_option('debuginfod')
   tracy_common_args += ['-DTRACY_DEBUGINFOD']
   tracy_public_deps += dependency('libdebuginfod')
+endif
+
+if get_option('ignore_memory_faults')
+  tracy_common_args += ['-DTRACY_IGNORE_MEMORY_FAULTS']
 endif
 
 tracy_shared_libs = get_option('default_library') == 'shared'

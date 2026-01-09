@@ -2,7 +2,6 @@
 #include <curl/curl.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <ranges>
 
 #include "TracyConfig.hpp"
 #include "TracyImGui.hpp"
@@ -13,9 +12,10 @@
 #include "TracyPrint.hpp"
 #include "TracyWeb.hpp"
 #include "../Fonts.hpp"
+#include "../public/common/TracySystem.hpp"
 
 #include "data/SystemPrompt.hpp"
-#include "data/SystemReminder.hpp"
+#include "data/ToolsJson.hpp"
 
 namespace tracy
 {
@@ -24,7 +24,7 @@ extern double s_time;
 
 constexpr size_t InputBufferSize = 1024;
 
-TracyLlm::TracyLlm( Worker& worker )
+TracyLlm::TracyLlm( Worker& worker, const TracyManualData& manual )
     : m_exit( false )
     , m_input( nullptr )
 {
@@ -39,7 +39,8 @@ TracyLlm::TracyLlm( Worker& worker )
     }
 
     m_systemPrompt = Unembed( SystemPrompt );
-    m_systemReminder = Unembed( SystemReminder );
+    auto toolsJson = Unembed( ToolsJson );
+    m_toolsJson = nlohmann::json::parse( toolsJson->data(), toolsJson->data() + toolsJson->size() );
 
     m_input = new char[InputBufferSize];
     m_apiInput = new char[InputBufferSize];
@@ -47,7 +48,7 @@ TracyLlm::TracyLlm( Worker& worker )
 
     m_api = std::make_unique<TracyLlmApi>();
     m_chatUi = std::make_unique<TracyLlmChat>();
-    m_tools = std::make_unique<TracyLlmTools>( worker );
+    m_tools = std::make_unique<TracyLlmTools>( worker, manual );
 
     m_busy = true;
     QueueConnect();
@@ -83,7 +84,7 @@ void TracyLlm::Draw()
         ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
         TextCentered( ICON_FA_HOURGLASS );
-        TextCentered( "Please wait..." );
+        TextCentered( "Please wait…" );
         DrawWaitingDots( s_time );
         ImGui::PopFont();
         ImGui::End();
@@ -99,7 +100,7 @@ void TracyLlm::Draw()
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 7 ) * 0.5f ) );
         TextCentered( ICON_FA_BOOK_BOOKMARK );
         ImGui::Spacing();
-        TextCentered( "Building manual embeddings..." );
+        TextCentered( "Building manual embeddings…" );
         ImGui::Spacing();
         DrawWaitingDots( s_time );
         ImGui::TextUnformatted( "" );
@@ -163,6 +164,7 @@ void TracyLlm::Draw()
         const auto sz = std::min( InputBufferSize-1, s_config.llmAddress.size() );
         memcpy( m_apiInput, s_config.llmAddress.c_str(), sz );
         m_apiInput[sz] = 0;
+        ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.x );
         bool changed = ImGui::InputTextWithHint( "##api", "http://localhost:1234", m_apiInput, InputBufferSize );
         ImGui::SameLine();
         if( ImGui::BeginCombo( "##presets", nullptr, ImGuiComboFlags_NoPreview ) )
@@ -175,7 +177,6 @@ void TracyLlm::Draw()
             constexpr static std::array presets = {
                 Preset { "Llama.cpp", "http://localhost:8080" },
                 Preset { "LM Studio", "http://localhost:1234" },
-                Preset { "Ollama", "http://localhost:11434" },
             };
             for( auto& preset : presets )
             {
@@ -204,6 +205,7 @@ void TracyLlm::Draw()
         }
         else
         {
+            ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x );
             if( ImGui::BeginCombo( "##model", models[m_modelIdx].name.c_str() ) )
             {
                 for( size_t i = 0; i < models.size(); ++i )
@@ -236,6 +238,7 @@ void TracyLlm::Draw()
         }
         else
         {
+            ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x );
             if( ImGui::BeginCombo( "##embedmodel", models[m_embedIdx].name.c_str() ) )
             {
                 for( size_t i = 0; i < models.size(); ++i )
@@ -259,23 +262,28 @@ void TracyLlm::Draw()
                 ImGui::EndCombo();
             }
         }
-
-        ImGui::Checkbox( ICON_FA_TEMPERATURE_HALF " Temperature", &m_setTemperature );
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth( 40 * scale );
-        if( ImGui::InputFloat( "##temperature", &m_temperature, 0, 0, "%.2f" ) ) m_temperature = std::clamp( m_temperature, 0.f, 2.f );
         if( responding ) ImGui::EndDisabled();
 
-        ImGui::Checkbox( ICON_FA_GLOBE " Internet access", &m_tools->m_netAccess );
+        ImGui::Checkbox( ICON_FA_EARTH_AMERICAS " Internet access", &m_tools->m_netAccess );
 
-        if( ImGui::TreeNode( "External services" ) )
+        if( ImGui::TreeNode( "Advanced" ) )
         {
+            if( responding ) ImGui::BeginDisabled();
+            ImGui::Checkbox( ICON_FA_TEMPERATURE_HALF " Temperature", &m_setTemperature );
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth( 40 * scale );
+            if( ImGui::InputFloat( "##temperature", &m_temperature, 0, 0, "%.2f" ) ) m_temperature = std::clamp( m_temperature, 0.f, 2.f );
+            if( responding ) ImGui::EndDisabled();
+
+            ImGui::Checkbox( ICON_FA_LIGHTBULB " Show all thinking regions", &m_allThinkingRegions );
+
             char buf[1024];
 
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted( "User agent:" );
             ImGui::SameLine();
             snprintf( buf, sizeof( buf ), "%s", s_config.llmUserAgent.c_str() );
+            ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x );
             if( ImGui::InputTextWithHint( "##useragent", "Spoof user agent", buf, sizeof( buf ) ) )
             {
                 s_config.llmUserAgent = buf;
@@ -286,6 +294,7 @@ void TracyLlm::Draw()
             ImGui::TextUnformatted( "Google Search Engine:" );
             ImGui::SameLine();
             snprintf( buf, sizeof( buf ), "%s", s_config.llmSearchIdentifier.c_str() );
+            ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize( ICON_FA_HOUSE ).x - ImGui::GetStyle().FramePadding.x * 2 - ImGui::GetStyle().ItemSpacing.x );
             if( ImGui::InputTextWithHint( "##cse", "search identifier", buf, sizeof( buf ) ) )
             {
                 s_config.llmSearchIdentifier = buf;
@@ -298,6 +307,7 @@ void TracyLlm::Draw()
             ImGui::TextUnformatted( "Google Search API Key:" );
             ImGui::SameLine();
             snprintf( buf, sizeof( buf ), "%s", s_config.llmSearchApiKey.c_str() );
+            ImGui::SetNextItemWidth( ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize( ICON_FA_HOUSE ).x - ImGui::GetStyle().FramePadding.x * 2 - ImGui::GetStyle().ItemSpacing.x );
             if( ImGui::InputTextWithHint( "##csekey", "search API key", buf, sizeof( buf ) ) )
             {
                 s_config.llmSearchApiKey = buf;
@@ -423,6 +433,20 @@ void TracyLlm::Draw()
         ImGui::PushID( m_chatId );
         m_chatUi->Begin();
 
+        int thinkIdx = 0;
+        if( !m_allThinkingRegions )
+        {
+            for( thinkIdx = m_chat.size(); thinkIdx > 0; thinkIdx-- )
+            {
+                const auto& line = m_chat[thinkIdx-1];
+                if( !line.contains( "role" ) ) break;
+                const auto& roleStr = line["role"].get_ref<const std::string&>();
+                if( roleStr == "tool" ) continue;
+                if( roleStr == "assistant" && !line.contains( "content" ) ) continue;
+                break;
+            }
+        }
+
         int turnIdx = 0;
         for( auto it = m_chat.begin(); it != m_chat.end(); ++it )
         {
@@ -430,48 +454,65 @@ void TracyLlm::Draw()
             if( !line.contains( "role" ) ) break;
             const auto& roleStr = line["role"].get_ref<const std::string&>();
             if( roleStr == "system" ) continue;
-            const auto& contentNode = line["content"];
-            if( !contentNode.is_string() ) continue;
-            const auto& content = contentNode.get_ref<const std::string&>();
 
             TracyLlmChat::TurnRole role = TracyLlmChat::TurnRole::None;
             if( roleStr == "user" ) role = TracyLlmChat::TurnRole::User;
             else if( roleStr == "error" ) role = TracyLlmChat::TurnRole::Error;
-            else if( roleStr == "assistant" ) role = TracyLlmChat::TurnRole::Assistant;
+            else if( roleStr == "assistant" || roleStr == "tool" ) role = TracyLlmChat::TurnRole::Assistant;
             else assert( false );
 
             if( role == TracyLlmChat::TurnRole::User )
             {
-                if( content.starts_with( "<tool_output>\n" ) ) role = TracyLlmChat::TurnRole::Assistant;
-                else if( content.starts_with( "<debug>" ) ) role = TracyLlmChat::TurnRole::UserDebug;
-                else if( content.starts_with( "<attachment>\n" ) ) role = TracyLlmChat::TurnRole::Attachment;
-            }
-            else if( role == TracyLlmChat::TurnRole::Assistant )
-            {
-                if( content.starts_with( "<debug>" ) ) role = TracyLlmChat::TurnRole::AssistantDebug;
+                if( line.contains( "content" ) && line["content"].get_ref<const std::string&>().starts_with( "<attachment>\n" ) ) role = TracyLlmChat::TurnRole::Attachment;
             }
 
             ImGui::PushID( turnIdx++ );
-            if( !m_chatUi->Turn( role, content ) )
+            TracyLlmChat::Think think = TracyLlmChat::Think::Hide;
+            if( thinkIdx <= turnIdx )
             {
-                if( role == TracyLlmChat::TurnRole::Assistant || role == TracyLlmChat::TurnRole::AssistantDebug )
+                think = TracyLlmChat::Think::Show;
+            }
+            else if( thinkIdx == turnIdx + 1 && role == TracyLlmChat::TurnRole::Assistant && line.contains( "content" ) )
+            {
+                think = TracyLlmChat::Think::ToolCall;
+            }
+            if( !m_chatUi->Turn( role, line, think, turnIdx == m_chat.size() - 1 ) )
+            {
+                if( role == TracyLlmChat::TurnRole::Assistant )
                 {
                     QueueSendMessage();
                 }
-                else if( role == TracyLlmChat::TurnRole::User || role == TracyLlmChat::TurnRole::UserDebug )
+                else if( role == TracyLlmChat::TurnRole::User )
                 {
-                    const auto sz = std::min( InputBufferSize - 1, content.size() );
-                    memcpy( m_input, content.data(), sz );
-                    m_input[sz] = 0;
-                    inputChanged = true;
+                    if( line.contains( "content" ) )
+                    {
+                        auto& content = line["content"].get_ref<const std::string&>();
+                        const auto sz = std::min( InputBufferSize - 1, content.size() );
+                        memcpy( m_input, content.data(), sz );
+                        m_input[sz] = 0;
+                        inputChanged = true;
+                    }
                 }
 
                 auto cit = it;
                 while( cit != m_chat.end() )
                 {
-                    const auto& content = (*cit)["content"].get_ref<const std::string&>();
-                    const auto tokens = m_api->Tokenize( content, m_modelIdx );
-                    m_usedCtx -= tokens >= 0 ? tokens : content.size() / 4;
+                    auto& v = *cit;
+                    int tokens = 0;
+                    int length = 0;
+                    if( v.contains( "content" ) )
+                    {
+                        auto& str = v["content"].get_ref<std::string&>();
+                        tokens = m_api->Tokenize( str, m_modelIdx );
+                        length = str.size();
+                    }
+                    if( v.contains( "reasoning_content" ) )
+                    {
+                        auto& str = v["reasoning_content"].get_ref<std::string&>();
+                        tokens += m_api->Tokenize( str, m_modelIdx );
+                        length += str.size();
+                    }
+                    m_usedCtx -= tokens >= 0 ? tokens : length / 4;
                     ++cit;
                 }
 
@@ -511,11 +552,11 @@ void TracyLlm::Draw()
         ImGui::SameLine();
         if( disabled )
         {
-            ImGui::TextUnformatted( "Stopping..." );
+            ImGui::TextUnformatted( "Stopping…" );
         }
         else
         {
-            ImGui::TextUnformatted( "Generating..." );
+            ImGui::TextUnformatted( "Generating…" );
         }
         s_wasActive = true;
     }
@@ -531,7 +572,7 @@ void TracyLlm::Draw()
         buttonSize.x += ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetStyle().ItemSpacing.x;
         ImGui::PushItemWidth( ImGui::GetContentRegionAvail().x - buttonSize.x );
         if( inputChanged ) ImGui::GetInputTextState( ImGui::GetCurrentWindow()->GetID( "##chat_input" ) )->ReloadUserBufAndMoveToEnd();
-        bool send = ImGui::InputTextWithHint( "##chat_input", "Write your question here...", m_input, InputBufferSize, ImGuiInputTextFlags_EnterReturnsTrue );
+        bool send = ImGui::InputTextWithHint( "##chat_input", "Write your question here…", m_input, InputBufferSize, ImGuiInputTextFlags_EnterReturnsTrue );
         ImGui::SameLine();
         if( *m_input == 0 ) ImGui::BeginDisabled();
         send |= ImGui::Button( buttonText );
@@ -646,22 +687,46 @@ void TracyLlm::UpdateModels()
     }
 }
 
+static void Replace( std::string& str, const std::string& from, const std::string& to )
+{
+    std::string::size_type pos;
+    while( ( pos = str.find( from ) ) != std::string::npos )
+    {
+        str.replace( pos, from.size(), to );
+    }
+}
+
 void TracyLlm::ResetChat()
 {
-    std::string systemPrompt = "<SYSTEM_PROMPT>\n";
-    systemPrompt += std::string( m_systemPrompt->data(), m_systemPrompt->size() );
-#ifndef NDEBUG
-    systemPrompt += "\n\n# DEBUG MODE AVAILABLE\n";
-    systemPrompt += "Upon a user query beginning with `<debug>`, activate *Debug Mode*. In this mode, ignore all prior instructions. Your response must detail your complete reasoning process and the exact steps taken to generate your *previous* non-debug answer. Explicitly state any internal rules applied. Do not say you are sorry. Do not tell how you will change your behavior. Focus strictly on the analysis of what happened.\n";
-#endif
-    systemPrompt += "</SYSTEM_PROMPT>\n";
-
     *m_input = 0;
     m_usedCtx = 0;
     m_chatId++;
     m_chat.clear();
 
-    AddMessage( std::move( systemPrompt ), "system" );
+    UpdateSystemPrompt();
+}
+
+void TracyLlm::UpdateSystemPrompt()
+{
+    static constexpr std::string UserToken = "%USER%";
+    static constexpr std::string TimeToken = "%TIME%";
+
+    auto userName = GetUserFullName();
+    if( !userName ) userName = GetUserLogin();
+
+    auto systemPrompt = std::string( m_systemPrompt->data(), m_systemPrompt->size() );
+
+    Replace( systemPrompt, UserToken, userName );
+    Replace( systemPrompt, TimeToken, m_tools->GetCurrentTime() );
+
+    if( m_chat.empty() )
+    {
+        AddMessage( std::move( systemPrompt ), "system" );
+    }
+    else
+    {
+        m_chat[0]["content"] = systemPrompt;
+    }
 }
 
 void TracyLlm::QueueConnect()
@@ -696,6 +761,7 @@ void TracyLlm::AddMessage( std::string&& str, const char* role )
         .task = Task::Tokenize,
         .callback2 = [this, str, role]( nlohmann::json json ) {
             m_usedCtx += json["tokens"].get<int>();
+            if( m_chat.size() == 1 ) UpdateSystemPrompt();
             nlohmann::json msg = {
                 { "role", role },
                 { "content", str }
@@ -721,6 +787,17 @@ void TracyLlm::AddMessageBlocking( std::string&& str, const char* role, std::uni
     if( lock ) lock.unlock();
 }
 
+void TracyLlm::AddMessageBlocking( nlohmann::json&& json, std::unique_lock<std::mutex>& lock )
+{
+    auto dump = json.dump();
+    const auto tokens = m_api ? m_api->Tokenize( dump, m_modelIdx ) : -1;
+    m_usedCtx += tokens >= 0 ? tokens : dump.size() / 4;
+
+    if( lock ) lock.lock();
+    m_chat.emplace_back( std::move( json ) );
+    if( lock ) lock.unlock();
+}
+
 void TracyLlm::AddAttachment( std::string&& str, const char* role )
 {
     AddMessage( "<attachment>\n" + std::move( str ), role );
@@ -739,14 +816,10 @@ void TracyLlm::ManageContext( std::unique_lock<std::mutex>& lock )
     std::vector<std::pair<size_t, size_t>> toolOutputs;
     for( auto& msg : m_chat )
     {
-        if( msg["role"].get_ref<const std::string&>() == "user" )
+        if( msg["role"].get_ref<const std::string&>() == "tool" )
         {
-            auto& content = msg["content"];
-            const auto& str = content.get_ref<const std::string&>();
-            if( str.starts_with( "<tool_output>\n" ) )
-            {
-                toolOutputs.emplace_back( str.size(), idx );
-            }
+            auto& str = msg["content"].get_ref<const std::string&>();
+            toolOutputs.emplace_back( str.size(), idx );
         }
         idx++;
     }
@@ -775,50 +848,35 @@ void TracyLlm::SendMessage( std::unique_lock<std::mutex>& lock )
     lock.unlock();
     ManageContext( lock );
 
-    bool debug = false;
-#ifndef NDEBUG
-    if( m_chat.size() > 1 && m_chat.back()["role"].get_ref<const std::string&>() == "user" )
-    {
-        const auto& content = m_chat.back()["content"].get_ref<const std::string&>();
-        if( content.starts_with( "<debug>" ) ) debug = true;
-    }
-#endif
-
-    if( debug )
-    {
-        AddMessageBlocking( "<debug>\n", "assistant", lock );
-    }
-    else
-    {
-        AddMessageBlocking( "<think>", "assistant", lock );
-    }
-
     bool res;
     try
     {
         auto chat = m_chat;
+        AddMessageBlocking( { { "role", "assistant" } }, lock );
 
-        std::string inject;
-        if( debug )
+        size_t i = 1;
+        while( i < chat.size() )
         {
-            inject += "<SYSTEM_REMINDER>\n";
-            inject += "You are in debug mode.\n";
-            inject += "</SYSTEM_REMINDER>\n";
+            if( chat[i]["role"].get_ref<const std::string&>() == "user" &&
+                chat[i-1]["role"].get_ref<const std::string&>() == "user" )
+            {
+                auto& str = chat[i-1]["content"].get_ref<std::string&>();
+                assert( str.starts_with( "<attachment>\n" ) );
+                str.append( "</attachment>\n\n" );
+                str.append( chat[i]["content"].get_ref<const std::string&>() );
+                chat.erase( chat.begin() + i );
+            }
+            else
+            {
+                i++;
+            }
         }
-        else
-        {
-            inject += "<SYSTEM_REMINDER>\n";
-            inject += std::string( m_systemReminder->data(), m_systemReminder->size() );
-            inject += "</SYSTEM_REMINDER>\n";
-        }
-
-        chat.front()["content"].get_ref<std::string&>().append( "\n\nThe current time is: " + m_tools->GetCurrentTime() + "\n" );
-        chat.back()["content"].get_ref<std::string&>().insert( 0, inject );
 
         nlohmann::json req;
         req["model"] = m_api->GetModels()[m_modelIdx].name;
         req["messages"] = std::move( chat );
         req["stream"] = true;
+        req["tools"] = m_toolsJson;
         if( m_setTemperature ) req["temperature"] = m_temperature;
 
         res = m_api->ChatCompletion( req, [this]( const nlohmann::json& response ) -> bool { return OnResponse( response ); }, m_modelIdx );
@@ -835,6 +893,51 @@ void TracyLlm::SendMessage( std::unique_lock<std::mutex>& lock )
     }
 }
 
+void TracyLlm::AppendResponse( const char* name, const nlohmann::json& delta )
+{
+    if( delta.contains( name ) )
+    {
+        auto& json = delta[name];
+        if( json.is_string() )
+        {
+            std::string str = json.get_ref<const std::string&>();
+            std::erase( str, '\r' );
+
+            auto& back = m_chat.back();
+            if( back.contains( name ) )
+            {
+                assert( back[name].is_string() );
+                back[name].get_ref<std::string&>().append( str );
+            }
+            else
+            {
+                back[name] = std::move( str );
+            }
+
+            m_usedCtx++;
+        }
+        else if( json.is_array() )
+        {
+            assert( json.size() == 1 );
+            auto& val = json[0];
+            auto index = val["index"].get<size_t>();
+
+            auto& back = m_chat.back();
+            if( !back.contains( name ) ) back[name] = nlohmann::json::array();
+
+            auto& arr = back[name].get_ref<nlohmann::json::array_t&>();
+            if( index == arr.size() )
+            {
+                arr.push_back( val );
+            }
+            else
+            {
+                arr[index]["function"]["arguments"].get_ref<std::string&>().append( val["function"]["arguments"].get_ref<const std::string&>() );
+            }
+        }
+    }
+}
+
 bool TracyLlm::OnResponse( const nlohmann::json& json )
 {
     std::unique_lock lock( m_lock );
@@ -845,11 +948,8 @@ bool TracyLlm::OnResponse( const nlohmann::json& json )
         return false;
     }
 
-    auto& back = m_chat.back();
-    auto& content = back["content"];
-    const auto& str = content.get_ref<const std::string&>();
+    assert( m_chat.back()["role"].get_ref<const std::string&>() == "assistant" );
 
-    std::string responseStr;
     bool done = false;
     try
     {
@@ -858,7 +958,11 @@ bool TracyLlm::OnResponse( const nlohmann::json& json )
         {
             auto& node = choices[0];
             auto& delta = node["delta"];
-            if( delta.contains( "content" ) && delta["content"].is_string() ) responseStr = delta["content"].get_ref<const std::string&>();
+
+            AppendResponse( "content", delta );
+            AppendResponse( "reasoning_content", delta );
+            AppendResponse( "tool_calls", delta );
+
             done = !node["finish_reason"].empty();
         }
     }
@@ -866,13 +970,6 @@ bool TracyLlm::OnResponse( const nlohmann::json& json )
     {
         m_focusInput = true;
         return false;
-    }
-
-    if( !responseStr.empty() )
-    {
-        std::erase( responseStr, '\r' );
-        content = str + responseStr;
-        m_usedCtx++;
     }
 
     if( done )
@@ -883,52 +980,40 @@ bool TracyLlm::OnResponse( const nlohmann::json& json )
             if( usage.contains( "total_tokens" ) ) m_usedCtx = usage["total_tokens"].get<int>();
         }
 
-        bool isTool = false;
-        auto& str = back["content"].get_ref<const std::string&>();
-        if( !str.starts_with( "<debug>" ) )
+        auto& back = m_chat.back();
+        if( back.contains( "tool_calls" ) )
         {
-            auto pos = str.find( "<tool>" );
-            if( pos != std::string::npos )
+            auto calls = back["tool_calls"];
+            lock.unlock();
+            for( auto& call : calls )
             {
-                pos += 6;
-                while( str[pos] == '\n' ) pos++;
-                auto end = str.find( "</tool>", pos );
-                if( end != std::string::npos )
+                auto& id = call["id"].get_ref<const std::string&>();
+                auto& function = call["function"];
+                auto& name = function["name"].get_ref<const std::string&>();
+                auto& arguments = function["arguments"].get_ref<const std::string&>();
+
+                std::string result;
+                try
                 {
-                    auto repeat = str.find( "<tool>", end );
-                    if( repeat != std::string::npos )
-                    {
-                        lock.unlock();
-                        AddMessageBlocking( "<tool_output>\nError: Only one tool call is allowed per turn.", "user", lock );
-                        lock.lock();
-                    }
-                    else
-                    {
-                        while( end > pos && str[end-1] == '\n' ) end--;
-                        const auto tool = str.substr( pos, end - pos );
-                        lock.unlock();
-
-                        TracyLlmTools::ToolReply reply;
-                        try
-                        {
-                            auto json = nlohmann::json::parse( tool );
-                            reply = m_tools->HandleToolCalls( json, *m_api, m_api->GetModels()[m_modelIdx].contextSize, m_embedIdx >= 0 );
-                        }
-                        catch( const nlohmann::json::exception& e )
-                        {
-                            reply.reply = e.what();
-                        }
-
-                        isTool = true;
-                        auto output = "<tool_output>\n" + reply.reply;
-                        AddMessageBlocking( std::move( output ), "user", lock );
-                        lock.lock();
-                    }
-                    QueueSendMessage();
+                    result = m_tools->HandleToolCalls( name, nlohmann::json::parse( arguments ), *m_api, m_api->GetModels()[m_modelIdx].contextSize, m_embedIdx >= 0 ).reply;
                 }
+                catch( const nlohmann::json::exception& e )
+                {
+                    result = nlohmann::json { "error", e.what() };
+                }
+
+                nlohmann::json reply = {
+                    { "role", "tool" },
+                    { "tool_call_id", id },
+                    { "name", name },
+                    { "content", result }
+                };
+                AddMessageBlocking( std::move( reply ), lock );
             }
+            lock.lock();
+            QueueSendMessage();
         }
-        if( !isTool )
+        else
         {
             m_focusInput = true;
         }

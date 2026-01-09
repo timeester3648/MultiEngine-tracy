@@ -17,6 +17,7 @@ namespace tracy
 {
 
 class TracyLlmApi;
+class TracyManualData;
 class Worker;
 
 class TracyLlmTools
@@ -36,18 +37,10 @@ public:
         float progress = 0;
     };
 
-    struct ManualChunk
-    {
-        std::string text;
-        std::string section;
-        std::string title;
-        std::string parents;
-    };
-
-    TracyLlmTools( Worker& worker );
+    TracyLlmTools( Worker& worker, const TracyManualData& manual );
     ~TracyLlmTools();
 
-    ToolReply HandleToolCalls( const nlohmann::json& json, TracyLlmApi& api, int contextSize, bool hasEmbeddingsModel );
+    ToolReply HandleToolCalls( const std::string& tool, const nlohmann::json& json, TracyLlmApi& api, int contextSize, bool hasEmbeddingsModel );
     std::string GetCurrentTime() const;
 
     [[nodiscard]] EmbeddingState GetManualEmbeddingsState() const;
@@ -68,7 +61,8 @@ private:
     std::string SearchWeb( std::string query );
     std::string GetWebpage( const std::string& url );
     std::string SearchManual( const std::string& query, TracyLlmApi& api, bool hasEmbeddingsModel );
-    std::string SourceFile( const std::string& file, uint32_t line ) const;
+    std::string SourceFile( const std::string& file, uint32_t line, uint32_t context ) const;
+    std::string SourceSearch( std::string query, bool caseInsensitive ) const;
 
     void ManualEmbeddingsWorker( TracyLlmApi& api );
 
@@ -82,11 +76,10 @@ private:
     EmbeddingState m_manualEmbeddingState;
     std::unique_ptr<TracyLlmEmbeddings> m_manualEmbeddings;
 
-    std::shared_ptr<EmbedData> m_manual;
-    std::vector<ManualChunk> m_manualChunks;
     std::vector<std::pair<std::string, uint32_t>> m_chunkData;
 
     Worker& m_worker;
+    const TracyManualData& m_manual;
 };
 
 }

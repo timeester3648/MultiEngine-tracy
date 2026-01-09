@@ -17,6 +17,7 @@
 #include "TracyFileRead.hpp"
 #include "TracyFilesystem.hpp"
 #include "TracyImGui.hpp"
+#include "TracyManualData.hpp"
 #include "TracyPrint.hpp"
 #include "TracySourceView.hpp"
 #include "TracyTexture.hpp"
@@ -57,11 +58,12 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), const char*
     , m_achievements( s_config.achievements )
     , m_horizontalScrollMultiplier( s_config.horizontalScrollMultiplier )
     , m_verticalScrollMultiplier( s_config.verticalScrollMultiplier )
+    , m_manualData( std::make_shared<TracyManualData>() )
 #ifdef __EMSCRIPTEN__
     , m_td( 2, "ViewMt" )
 #else
     , m_td( std::thread::hardware_concurrency(), "ViewMt" )
-    , m_llm( m_worker )
+    , m_llm( m_worker, *m_manualData )
 #endif
 {
     InitTextEditor();
@@ -86,11 +88,12 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f
     , m_achievements( s_config.achievements )
     , m_horizontalScrollMultiplier( s_config.horizontalScrollMultiplier )
     , m_verticalScrollMultiplier( s_config.verticalScrollMultiplier )
+    , m_manualData( std::make_shared<TracyManualData>() )
 #ifdef __EMSCRIPTEN__
     , m_td( 2, "ViewMt" )
 #else
     , m_td( std::thread::hardware_concurrency(), "ViewMt" )
-    , m_llm( m_worker )
+    , m_llm( m_worker, *m_manualData )
 #endif
 {
     m_notificationTime = 4;
@@ -123,7 +126,9 @@ View::~View()
     if( m_compare.loadThread.joinable() ) m_compare.loadThread.join();
     if( m_saveThread.joinable() ) m_saveThread.join();
 
-    if( m_frameTexture ) FreeTexture( m_frameTexture, m_cbMainThread );
+    if( m_FrameTextureCache.textureId ) FreeTexture( m_FrameTextureCache.textureId, m_cbMainThread );
+    if( m_FrameTextureCacheConnection.textureId ) FreeTexture( m_FrameTextureCacheConnection.textureId, m_cbMainThread );
+
     if( m_playback.texture ) FreeTexture( m_playback.texture, m_cbMainThread );
 }
 
@@ -696,7 +701,7 @@ bool View::DrawImpl()
         TextCentered( ICON_FA_WIFI );
         ImGui::Spacing();
         ImGui::PopFont();
-        ImGui::TextUnformatted( "Waiting for connection..." );
+        ImGui::TextUnformatted( "Waiting for connection…" );
         DrawWaitingDots( s_time );
         ImGui::End();
         return keepOpen;
@@ -941,6 +946,8 @@ bool View::DrawImpl()
         }
         ImGui::EndPopup();
     }
+    ImGui::SameLine();
+    ToggleButton( ICON_FA_BOOK, m_showManual );
     if( m_sscb )
     {
         ImGui::SameLine();
@@ -1164,6 +1171,7 @@ bool View::DrawImpl()
     if( m_sampleParents.symAddr != 0 ) DrawSampleParents();
     if( m_showRanges ) DrawRanges();
     if( m_showWaitStacks ) DrawWaitStacks();
+    if( m_showManual ) DrawManual();
 #ifndef __EMSCRIPTEN__
     if( m_llm.m_show ) m_llm.Draw();
 #endif
@@ -1351,6 +1359,24 @@ bool View::DrawImpl()
     }
 
     return keepOpen;
+}
+
+void View::DrawFrameImage( FrameImageCache& cache, const FrameImage& fi, float scale )
+{
+    if ( fi.ptr != cache.dataPtr )
+    {
+        if( !cache.textureId ) cache.textureId = MakeTexture();
+        UpdateTexture( cache.textureId, m_worker.UnpackFrameImage( fi ), fi.w, fi.h );
+        cache.dataPtr = fi.ptr;
+    }
+    if( fi.flip )
+    {
+        ImGui::Image( cache.textureId, ImVec2( fi.w * scale, fi.h * scale ), ImVec2( 0, 1 ), ImVec2( 1, 0 ) );
+    }
+    else
+    {
+        ImGui::Image( cache.textureId, ImVec2( fi.w * scale, fi.h * scale ) );
+    }
 }
 
 void View::DrawTextEditor()
