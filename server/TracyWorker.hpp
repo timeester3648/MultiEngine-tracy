@@ -828,8 +828,8 @@ private:
     void ZoneValueFailure( uint64_t thread, uint64_t value );
     void ZoneColorFailure( uint64_t thread );
     void ZoneNameFailure( uint64_t thread );
-    void MemFreeFailure( uint64_t thread );
-    void MemAllocTwiceFailure( uint64_t thread );
+    void MemFreeFailure( uint64_t thread, const QueueMemFree& ev );
+    void MemAllocTwiceFailure( uint64_t thread, const QueueMemAlloc& ev );
     void FrameEndFailure();
     void FrameImageIndexFailure();
     void FrameImageTwiceFailure();

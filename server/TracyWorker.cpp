@@ -5063,17 +5063,19 @@ void Worker::ZoneNameFailure( uint64_t thread )
     m_failureData.thread = thread;
 }
 
-void Worker::MemFreeFailure( uint64_t thread )
+void Worker::MemFreeFailure( uint64_t thread, const QueueMemFree& ev )
 {
     m_failure = Failure::MemFree;
     m_failureData.thread = thread;
+    m_failureData.message = std::format( "The pointer was: {:#x}", ev.ptr );
     m_failureData.callstack = m_serialNextCallstack;
 }
 
-void Worker::MemAllocTwiceFailure( uint64_t thread )
+void Worker::MemAllocTwiceFailure( uint64_t thread, const QueueMemAlloc& ev )
 {
     m_failure = Failure::MemAllocTwice;
     m_failureData.thread = thread;
+    m_failureData.message = std::format( "The pointer was: {:#x}", ev.ptr );
     m_failureData.callstack = m_serialNextCallstack;
 }
 
@@ -6096,7 +6098,7 @@ MemEvent* Worker::ProcessMemAllocImpl( MemData& memdata, const QueueMemAlloc& ev
 {
     if( memdata.active.find( ev.ptr ) != memdata.active.end() )
     {
-        MemAllocTwiceFailure( ev.thread );
+        MemAllocTwiceFailure( ev.thread, ev );
         return nullptr;
     }
 
@@ -6147,7 +6149,7 @@ MemEvent* Worker::ProcessMemFreeImpl( MemData& memdata, const QueueMemFree& ev )
         if( !m_ignoreMemFreeFaults )
         {
             CheckThreadString( ev.thread );
-            MemFreeFailure( ev.thread );
+            MemFreeFailure( ev.thread, ev );
         }
         return nullptr;
     }
